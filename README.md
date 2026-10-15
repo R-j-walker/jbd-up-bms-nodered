@@ -1,4 +1,4 @@
-# Datou Boss 48V Battery (JBD UP16S BMS) Node-RED Flow for Home Assistant
+# JBD UP16S BMS (Datou Boss DT-48314S, Eco-Worthy, etc) Node-RED Flow for Home Assistant
 
 [![Node-RED](https://img.shields.io/badge/Node--RED-v3%2B-red?logo=node-red)](https://nodered.org)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-MQTT%20Discovery-blue?logo=home-assistant)](https://www.home-assistant.io)
@@ -13,7 +13,9 @@ A complete, production-ready **Node-RED flow** that bridges **Datou Boss 48V LiF
 
 Most open-source JBD BMS tools (such as Overkill Solar, BatMon, or ESPHome JBD integrations) are designed for the classic JBD UART protocol (`0xDD`/`0xA5`).
 
-**The Datou Boss DT-48314S, some Eco Worthy, and likely some other batteries utilize the newer JBD UP series (UP16S) BMS**, which operates over an RS485 Modbus RTU-like variant with proprietary function codes (`0x78` read, `0x79` write). This flow implements full packet encoding, decoding, Modbus CRC-16 validation, rate-limited polling, and automatic Home Assistant MQTT discovery with **zero YAML configuration required**. The UP series BMS does respond to the 'classic' JBD protocol and provide voltage data etc, but some info is not returned properly such as cell balancing info. Hence this repo.
+**The Datou Boss DT-48314S, some Eco-Worthy, and likely some other batteries utilize the newer JBD UP series (UP16S) BMS**, which operates over an RS485 Modbus RTU-like variant with proprietary function codes (`0x78` read, `0x79` write). This flow implements full packet encoding, decoding, Modbus CRC-16 validation, rate-limited polling, and automatic Home Assistant MQTT discovery with **zero YAML configuration required**. The UP series BMS does respond to the 'classic' JBD protocol and provide voltage data etc, but some info is not returned properly such as cell balancing info. Hence this repo.
+
+**Check your BMS is definitely a JBD UP series device. This has only been tested with Datou Boss DT-48314S batteries. For all I know even those batteries could change the BMS model used in the future. Running these commands against an incompatible BMS could be dangerous! There is no warranty provided. Even with the correct BMS, if you destroy your BMS/battery/house/life it's not my fault :-)**
 
 Multiple batteries can be addressed and queried from the master battery.
 
