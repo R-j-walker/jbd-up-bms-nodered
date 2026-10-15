@@ -13,7 +13,7 @@ A complete, production-ready **Node-RED flow** that bridges **Datou Boss 48V LiF
 
 Most open-source JBD BMS tools (such as Overkill Solar, BatMon, or ESPHome JBD integrations) are designed for the classic JBD UART protocol (`0xDD`/`0xA5`).
 
-**Datou Boss server-rack and wall-mount batteries utilize the newer JBD UP series (UP16S) BMS**, which operates over an RS485 Modbus RTU-like variant with proprietary function codes (`0x78` read, `0x79` write). This flow implements full packet encoding, decoding, Modbus CRC-16 validation, rate-limited polling, and automatic Home Assistant MQTT discovery with **zero YAML configuration required**.
+**Datou Boss DT-48314S, some Eco Worthy, and likely other batteries utilize the newer JBD UP series (UP16S) BMS**, which operates over an RS485 Modbus RTU-like variant with proprietary function codes (`0x78` read, `0x79` write). This flow implements full packet encoding, decoding, Modbus CRC-16 validation, rate-limited polling, and automatic Home Assistant MQTT discovery with **zero YAML configuration required**. The UP series BMS does respond to the 'classic' JBD protocol and provide voltage data etc, but some info is not returned properly such as cell balancing info. Hence this repo.
 
 ---
 
