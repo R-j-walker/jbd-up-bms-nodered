@@ -13,7 +13,7 @@ A complete, production-ready **Node-RED flow** that bridges **Datou Boss 48V LiF
 
 Most open-source JBD BMS tools (such as Overkill Solar, BatMon, or ESPHome JBD integrations) are designed for the classic JBD UART protocol (`0xDD`/`0xA5`).
 
-**Datou Boss DT-48314S, some Eco Worthy, and likely other batteries utilize the newer JBD UP series (UP16S) BMS**, which operates over an RS485 Modbus RTU-like variant with proprietary function codes (`0x78` read, `0x79` write). This flow implements full packet encoding, decoding, Modbus CRC-16 validation, rate-limited polling, and automatic Home Assistant MQTT discovery with **zero YAML configuration required**. The UP series BMS does respond to the 'classic' JBD protocol and provide voltage data etc, but some info is not returned properly such as cell balancing info. Hence this repo.
+**The Datou Boss DT-48314S, some Eco Worthy, and likely some other batteries utilize the newer JBD UP series (UP16S) BMS**, which operates over an RS485 Modbus RTU-like variant with proprietary function codes (`0x78` read, `0x79` write). This flow implements full packet encoding, decoding, Modbus CRC-16 validation, rate-limited polling, and automatic Home Assistant MQTT discovery with **zero YAML configuration required**. The UP series BMS does respond to the 'classic' JBD protocol and provide voltage data etc, but some info is not returned properly such as cell balancing info. Hence this repo.
 
 Multiple batteries can be addressed and queried from the master battery.
 
@@ -86,7 +86,7 @@ flowchart LR
   * **Battery 2:** Address `2` (DIP 2 ON, others OFF).
 
 ### 2. RS485-to-Ethernet / WiFi Adapter
-Connect an industrial serial gateway to the battery's RS485 port. Popular options include:
+Connect an industrial serial gateway to the battery's standalone RS485 port (not either of the two ports used for chaining parallel batteries together). Popular options include:
 * **Waveshare RS485 to RJ45 Ethernet Converter** (e.g. RS485 TO ETH (B)) (tested and working)
 * **Elfin-EW11** (WiFi) or **Elfin-EE11** (Ethernet)
 * **USR-TCP232-304 / 410s**
