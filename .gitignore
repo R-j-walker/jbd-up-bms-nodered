@@ -1,0 +1,16 @@
+# Operating System Files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Node-RED credentials & local state
+*flows_cred.json
+.config.json
+.config.runtime.json
+.sessions.json
+
+# Scratch files
+scratch/
+*.log

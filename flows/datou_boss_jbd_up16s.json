@@ -1,0 +1,1195 @@
+[
+    {
+        "id": "656ba0b5eaf2edc4",
+        "type": "tab",
+        "label": "Battery Modbus",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "d222e1db84f22e70",
+        "type": "tab",
+        "label": "Battery 1 MQTT Discovery",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "ca3062c10fd3e312",
+        "type": "tab",
+        "label": "Battery 2 MQTT Discovery",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "75348da537ca70f5",
+        "type": "mqtt-broker",
+        "name": "Home Assistant MQTT Broker (Configure Me)",
+        "broker": "homeassistant.local",
+        "port": 1883,
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "9953ac5306dc13ab",
+        "type": "inject",
+        "z": "656ba0b5eaf2edc4",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "15",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 400,
+        "wires": [
+            [
+                "bb17303ed08b73ed"
+            ]
+        ]
+    },
+    {
+        "id": "bb17303ed08b73ed",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Main Stats Request (Batt 1)",
+        "func": "// Frame: Address 01, Func 78, Register 10 00, Length 10 A0, CRC 7F B2\nmsg.payload = Buffer.from([0x01, 0x78, 0x10, 0x00, 0x10, 0xA0, 0x00, 0x00, 0x7F, 0xB2]);\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 400,
+        "wires": [
+            [
+                "2e4a61e797e3b02a"
+            ]
+        ]
+    },
+    {
+        "id": "f18ef3725f6b85c4",
+        "type": "tcp request",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Connect to Serial Bridge (Configure IP & Port)",
+        "server": "192.168.1.100",
+        "port": "4196",
+        "out": "time",
+        "ret": "buffer",
+        "splitc": "250",
+        "newline": "",
+        "trim": false,
+        "tls": "",
+        "x": 890,
+        "y": 720,
+        "wires": [
+            [
+                "ab97384eac0c7ed2"
+            ]
+        ]
+    },
+    {
+        "id": "217224f4be3ffb4b",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Parse Main Stats (Batt 1)",
+        "func": "const buf = msg.payload;\n\n// 1. Modbus CRC-16 Check\nfunction validateCRC(buffer) {\n    if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;\n    \n    let crc = 0xFFFF;\n    const dataLength = buffer.length - 2; // Everything except the final 2 CRC bytes\n    \n    for (let i = 0; i < dataLength; i++) {\n        crc ^= buffer[i];\n        for (let j = 0; j < 8; j++) {\n            if (crc & 1) {\n                crc = (crc >> 1) ^ 0xA001;\n            } else {\n                crc >>= 1;\n            }\n        }\n    }\n    \n    // Modbus appends CRC as Little-Endian (LSB then MSB)\n    const receivedCrc = buffer.readUInt16LE(dataLength);\n    return crc === receivedCrc;\n}\n\n// Drop the payload immediately if the checksum fails\nif (!validateCRC(buf)) {\n    node.warn(\"CRC mismatch: Corrupted RS485 packet dropped\");\n    return null;\n}\n\nif (!Buffer.isBuffer(buf) || buf.length < 122 || buf[0] !== 0x01 || buf[1] !== 0x78) {\n    return null;\n}\n\n// 1. Pack Electricals\nconst voltage = buf.readUInt16BE(8) / 100;         // Volts\n\n// UP16S Current is a 32-bit int at byte 12, offset by 300,000\nconst rawCurrent = buf.readUInt32BE(12);\nconst current = (rawCurrent - 300000) / 100;       // Amps (Signed)\n\nconst power = Math.round(voltage * current * 10) / 10; // Watts\n\n// Corrected Offsets for UP16S Hardware\nconst soc = buf.readUInt16BE(16) / 100;            // SOC % (e.g., 10000 = 100.00%)\nconst remainCap = buf.readUInt16BE(18) / 100;      // Remaining Ah\nconst fullCap = buf.readUInt16BE(20) / 100;        // Full Capacity Ah\nconst cycles = buf.readUInt16BE(46);               // Cycle count\n\n// 2. Cell Voltages (16 Cells)\nconst cellCount = buf.readUInt16BE(74);\nconst cellVolts = [];\nlet minV = 9999, maxV = 0, sumV = 0;\nlet minIdx = 0, maxIdx = 0;\n\nfor (let i = 0; i < cellCount; i++) {\n    const vMv = buf.readUInt16BE(76 + (i * 2));\n    const v = vMv / 1000;\n    cellVolts.push(v);\n    sumV += v;\n    \n    if (vMv < minV) { minV = vMv; minIdx = i + 1; }\n    if (vMv > maxV) { maxV = vMv; maxIdx = i + 1; }\n}\n\n// Math stats\nconst avgV = (sumV / cellCount).toFixed(3);\nconst sorted = [...cellVolts].sort((a, b) => a - b);\nconst medianV = ((sorted[7] + sorted[8]) / 2).toFixed(3);\n\n// 3. Temperatures (4 probes in payload, scaled: (val - 500) / 10)\nconst temps = {};\nfor (let t = 0; t < 4; t++) {\n    const rawT = buf.readUInt16BE(110 + (t * 2));\n    temps[`temp_cell_${t + 1}`] = ((rawT - 500) / 10).toFixed(1);\n}\n\n// 4. Balancing Status\nconst balanceMask = buf.readUInt32BE(118);\nconst balancingCells = [];\nfor (let i = 0; i < cellCount; i++) {\n    if ((balanceMask & (1 << i)) !== 0) balancingCells.push(i + 1);\n}\n\n// 5. Estimated Runtime\nlet runtime = 0;\nif (current < -0.5) {\n    runtime = Math.abs(remainCap / current).toFixed(1); // Hours to empty\n}\n\n// Assemble JSON Payload matching Discovery entities\nconst data = {\n    voltage: voltage,\n    current: current,\n    power: power,\n    soc: soc,\n    capacity: fullCap,\n    charge: remainCap,\n    num_cycles: cycles,\n    total_cycle_count: cycles,\n    runtime: Number(runtime),\n    \n    cell_volt_min: (minV / 1000).toFixed(3),\n    cell_volt_max: (maxV / 1000).toFixed(3),\n    cell_volt_average: Number(avgV),\n    cell_volt_median: Number(medianV),\n    cell_volt_delta: Number(((maxV - minV) / 1000).toFixed(3)),\n    cell_index_min: minIdx,\n    cell_index_max: maxIdx,\n    \n    temp_cell_1: Number(temps.temp_cell_1),\n    temp_cell_2: Number(temps.temp_cell_2),\n    temp_cell_3: Number(temps.temp_cell_3),\n    temp_cell_4: Number(temps.temp_cell_4),\n    \n    balancing: balancingCells.length > 0 ? \"ON\" : \"OFF\",\n    balancing_cells: balancingCells.length > 0 ? balancingCells.join(\", \") : \"none\",\n};\n\n// Add individual cell voltages (cell_volt_01 to cell_volt_16)\nfor (let i = 0; i < cellCount; i++) {\n    const pad = (i + 1) < 10 ? '0' + (i + 1) : (i + 1);\n    data[`cell_volt_${pad}`] = cellVolts[i].toFixed(3);\n}\n\n// --- BATMON-HA SOFTWARE REPLICATION ---\nlet numSamples = context.get(\"numSamples\") || 0;\nnumSamples++;\ncontext.set(\"numSamples\", numSamples);\n\nlet lastTime = context.get(\"lastTime\") || Date.now();\nlet now = Date.now();\nlet deltaHours = (now - lastTime) / 3600000;\ncontext.set(\"lastTime\", now);\n\nlet eIn = context.get(\"eIn\") || 0; // Wh\nlet eOut = context.get(\"eOut\") || 0; // Wh\nlet cNet = context.get(\"cNet\") || 0; // Ah\n\nif (power > 0) {\n    eIn += power * deltaHours;\n    cNet += current * deltaHours;\n} else if (power < 0) {\n    eOut += Math.abs(power) * deltaHours;\n    cNet += current * deltaHours; // current is negative, so this subtracts\n}\ncontext.set(\"eIn\", eIn);\ncontext.set(\"eOut\", eOut);\ncontext.set(\"cNet\", cNet);\n\n// Append the missing fields to your existing 'data' object\ndata.num_samples = numSamples;\n// Extract Ambient (Byte 26) and MOS (Byte 24) temperatures\nconst mosTempRaw = buf.readUInt16BE(24);\nconst ambTempRaw = buf.readUInt16BE(26);\ndata.temp_ambient = Number(((ambTempRaw - 500) / 10).toFixed(1));\ndata.temp_mos = Number(((mosTempRaw - 500) / 10).toFixed(1));\ndata.total_energy_input = Number((eIn / 1000).toFixed(3)); // Convert to kWh\ndata.total_energy_output = Number((eOut / 1000).toFixed(3)); // Convert to kWh\ndata.total_energy_netted = Number(((eIn - eOut) / 1000).toFixed(3));\ndata.total_charge_netted = Number(cNet.toFixed(3));\n\n// Extract SOH, Alarms, and MOSFET States\nconst soh = buf.readUInt16BE(30);\nconst problemCode = buf.readUInt32BE(32); // 32-bit catches all error flags\nconst mosfet = buf.readUInt16BE(40);\n\ndata.soh = soh;\ndata.problem_code = problemCode;\ndata.problem = problemCode > 0 ? \"ON\" : \"OFF\";\ndata.charge_switch = (mosfet === 1 || mosfet === 3) ? \"ON\" : \"OFF\";\ndata.discharge_switch = (mosfet === 2 || mosfet === 3) ? \"ON\" : \"OFF\";\n\n// Final output\nmsg.topic = \"homeassistant/battery_1/state\";\nmsg.payload = JSON.stringify(data);\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1630,
+        "y": 460,
+        "wires": [
+            [
+                "61722df9b64a777e"
+            ]
+        ]
+    },
+    {
+        "id": "61722df9b64a777e",
+        "type": "mqtt out",
+        "z": "656ba0b5eaf2edc4",
+        "name": "",
+        "topic": "",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "75348da537ca70f5",
+        "x": 2030,
+        "y": 600,
+        "wires": []
+    },
+    {
+        "id": "2286e730cd9e8161",
+        "type": "inject",
+        "z": "656ba0b5eaf2edc4",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "15",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "2.5",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 500,
+        "wires": [
+            [
+                "4e380390f5d502a9"
+            ]
+        ]
+    },
+    {
+        "id": "4e380390f5d502a9",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Main Stats Request (Batt 2)",
+        "func": "msg.payload = Buffer.from([0x02, 0x78, 0x10, 0x00, 0x10, 0xA0, 0x00, 0x00, 0x3F, 0xA7]);\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 500,
+        "wires": [
+            [
+                "2e4a61e797e3b02a"
+            ]
+        ]
+    },
+    {
+        "id": "dab7398b6a315d23",
+        "type": "switch",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Battery ID",
+        "property": "payload[0]",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "1",
+                "vt": "num"
+            },
+            {
+                "t": "eq",
+                "v": "2",
+                "vt": "num"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 2,
+        "x": 1280,
+        "y": 520,
+        "wires": [
+            [
+                "217224f4be3ffb4b"
+            ],
+            [
+                "069d51babc9bd865"
+            ]
+        ]
+    },
+    {
+        "id": "069d51babc9bd865",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Parse Main Stats (Batt 1)",
+        "func": "const buf = msg.payload;\n\n// 1. Modbus CRC-16 Check\nfunction validateCRC(buffer) {\n    if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;\n    \n    let crc = 0xFFFF;\n    const dataLength = buffer.length - 2; // Everything except the final 2 CRC bytes\n    \n    for (let i = 0; i < dataLength; i++) {\n        crc ^= buffer[i];\n        for (let j = 0; j < 8; j++) {\n            if (crc & 1) {\n                crc = (crc >> 1) ^ 0xA001;\n            } else {\n                crc >>= 1;\n            }\n        }\n    }\n    \n    // Modbus appends CRC as Little-Endian (LSB then MSB)\n    const receivedCrc = buffer.readUInt16LE(dataLength);\n    return crc === receivedCrc;\n}\n\n// Drop the payload immediately if the checksum fails\nif (!validateCRC(buf)) {\n    node.warn(\"CRC mismatch: Corrupted RS485 packet dropped\");\n    return null;\n}\n\nif (!Buffer.isBuffer(buf) || buf.length < 122 || buf[0] !== 0x02 || buf[1] !== 0x78) {\n    return null;\n}\n\n// 1. Pack Electricals\nconst voltage = buf.readUInt16BE(8) / 100;         // Volts\n\n// UP16S Current is a 32-bit int at byte 12, offset by 300,000\nconst rawCurrent = buf.readUInt32BE(12);\nconst current = (rawCurrent - 300000) / 100;       // Amps (Signed)\n\nconst power = Math.round(voltage * current * 10) / 10; // Watts\n\n// Corrected Offsets for UP16S Hardware\nconst soc = buf.readUInt16BE(16) / 100;            // SOC % (e.g., 10000 = 100.00%)\nconst remainCap = buf.readUInt16BE(18) / 100;      // Remaining Ah\nconst fullCap = buf.readUInt16BE(20) / 100;        // Full Capacity Ah\nconst cycles = buf.readUInt16BE(46);               // Cycle count\n\n// 2. Cell Voltages (16 Cells)\nconst cellCount = buf.readUInt16BE(74);\nconst cellVolts = [];\nlet minV = 9999, maxV = 0, sumV = 0;\nlet minIdx = 0, maxIdx = 0;\n\nfor (let i = 0; i < cellCount; i++) {\n    const vMv = buf.readUInt16BE(76 + (i * 2));\n    const v = vMv / 1000;\n    cellVolts.push(v);\n    sumV += v;\n    \n    if (vMv < minV) { minV = vMv; minIdx = i + 1; }\n    if (vMv > maxV) { maxV = vMv; maxIdx = i + 1; }\n}\n\n// Math stats\nconst avgV = (sumV / cellCount).toFixed(3);\nconst sorted = [...cellVolts].sort((a, b) => a - b);\nconst medianV = ((sorted[7] + sorted[8]) / 2).toFixed(3);\n\n// 3. Temperatures (4 probes in payload, scaled: (val - 500) / 10)\nconst temps = {};\nfor (let t = 0; t < 4; t++) {\n    const rawT = buf.readUInt16BE(110 + (t * 2));\n    temps[`temp_cell_${t + 1}`] = ((rawT - 500) / 10).toFixed(1);\n}\n\n// 4. Balancing Status\nconst balanceMask = buf.readUInt32BE(118);\nconst balancingCells = [];\nfor (let i = 0; i < cellCount; i++) {\n    if ((balanceMask & (1 << i)) !== 0) balancingCells.push(i + 1);\n}\n\n// 5. Estimated Runtime\nlet runtime = 0;\nif (current < -0.5) {\n    runtime = Math.abs(remainCap / current).toFixed(1); // Hours to empty\n}\n\n// Assemble JSON Payload matching Discovery entities\nconst data = {\n    voltage: voltage,\n    current: current,\n    power: power,\n    soc: soc,\n    capacity: fullCap,\n    charge: remainCap,\n    num_cycles: cycles,\n    total_cycle_count: cycles,\n    runtime: Number(runtime),\n    \n    cell_volt_min: (minV / 1000).toFixed(3),\n    cell_volt_max: (maxV / 1000).toFixed(3),\n    cell_volt_average: Number(avgV),\n    cell_volt_median: Number(medianV),\n    cell_volt_delta: Number(((maxV - minV) / 1000).toFixed(3)),\n    cell_index_min: minIdx,\n    cell_index_max: maxIdx,\n    \n    temp_cell_1: Number(temps.temp_cell_1),\n    temp_cell_2: Number(temps.temp_cell_2),\n    temp_cell_3: Number(temps.temp_cell_3),\n    temp_cell_4: Number(temps.temp_cell_4),\n    \n    balancing: balancingCells.length > 0 ? \"ON\" : \"OFF\",\n    balancing_cells: balancingCells.length > 0 ? balancingCells.join(\", \") : \"none\",\n};\n\n// Add individual cell voltages (cell_volt_01 to cell_volt_16)\nfor (let i = 0; i < cellCount; i++) {\n    const pad = (i + 1) < 10 ? '0' + (i + 1) : (i + 1);\n    data[`cell_volt_${pad}`] = cellVolts[i].toFixed(3);\n}\n\n// --- BATMON-HA SOFTWARE REPLICATION ---\nlet numSamples = context.get(\"numSamples\") || 0;\nnumSamples++;\ncontext.set(\"numSamples\", numSamples);\n\nlet lastTime = context.get(\"lastTime\") || Date.now();\nlet now = Date.now();\nlet deltaHours = (now - lastTime) / 3600000;\ncontext.set(\"lastTime\", now);\n\nlet eIn = context.get(\"eIn\") || 0; // Wh\nlet eOut = context.get(\"eOut\") || 0; // Wh\nlet cNet = context.get(\"cNet\") || 0; // Ah\n\nif (power > 0) {\n    eIn += power * deltaHours;\n    cNet += current * deltaHours;\n} else if (power < 0) {\n    eOut += Math.abs(power) * deltaHours;\n    cNet += current * deltaHours; // current is negative, so this subtracts\n}\ncontext.set(\"eIn\", eIn);\ncontext.set(\"eOut\", eOut);\ncontext.set(\"cNet\", cNet);\n\n// Append the missing fields to your existing 'data' object\ndata.num_samples = numSamples;\n// Extract Ambient (Byte 26) and MOS (Byte 24) temperatures\nconst mosTempRaw = buf.readUInt16BE(24);\nconst ambTempRaw = buf.readUInt16BE(26);\ndata.temp_ambient = Number(((ambTempRaw - 500) / 10).toFixed(1));\ndata.temp_mos = Number(((mosTempRaw - 500) / 10).toFixed(1));\ndata.total_energy_input = Number((eIn / 1000).toFixed(3)); // Convert to kWh\ndata.total_energy_output = Number((eOut / 1000).toFixed(3)); // Convert to kWh\ndata.total_energy_netted = Number(((eIn - eOut) / 1000).toFixed(3));\ndata.total_charge_netted = Number(cNet.toFixed(3));\n\n// Extract SOH, Alarms, and MOSFET States\nconst soh = buf.readUInt16BE(30);\nconst problemCode = buf.readUInt32BE(32); // 32-bit catches all error flags\nconst mosfet = buf.readUInt16BE(40);\n\ndata.soh = soh;\ndata.problem_code = problemCode;\ndata.problem = problemCode > 0 ? \"ON\" : \"OFF\";\ndata.charge_switch = (mosfet === 1 || mosfet === 3) ? \"ON\" : \"OFF\";\ndata.discharge_switch = (mosfet === 2 || mosfet === 3) ? \"ON\" : \"OFF\";\n\n// Final output\nmsg.topic = \"homeassistant/battery_2/state\";\nmsg.payload = JSON.stringify(data);\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1630,
+        "y": 580,
+        "wires": [
+            [
+                "61722df9b64a777e"
+            ]
+        ]
+    },
+    {
+        "id": "2e4a61e797e3b02a",
+        "type": "delay",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Queue",
+        "pauseType": "rate",
+        "timeout": "5",
+        "timeoutUnits": "seconds",
+        "rate": "1",
+        "nbRateUnits": "3",
+        "rateUnits": "second",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": false,
+        "allowrate": false,
+        "outputs": 1,
+        "x": 710,
+        "y": 720,
+        "wires": [
+            [
+                "f18ef3725f6b85c4"
+            ]
+        ]
+    },
+    {
+        "id": "a926d9de4c7c33c8",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Protection Stats Request (Batt 1)",
+        "func": "// Set to 0x01 for Battery 1, or 0x02 for Battery 2\nconst address = 0x01; \n\n// Base Modbus request for Protection Thresholds (0x18 register, length 0x19)\nconst req = Buffer.from([address, 0x78, 0x18, 0x00, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00]);\n\n// Calculate Modbus CRC-16 for the request\nlet crc = 0xFFFF;\nfor (let i = 0; i < 8; i++) {\n    crc ^= req[i];\n    for (let j = 0; j < 8; j++) {\n        if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n        else crc >>= 1;\n    }\n}\n\n// Append the CRC (Little-Endian) to the final 2 bytes\nreq.writeUInt16LE(crc, 8);\n\nmsg.payload = req;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 360,
+        "y": 580,
+        "wires": [
+            [
+                "2e4a61e797e3b02a"
+            ]
+        ]
+    },
+    {
+        "id": "b34e8f2505dcfa08",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Protection Stats Request (Batt 2)",
+        "func": "// Set to 0x01 for Battery 1, or 0x02 for Battery 2\nconst address = 0x02; \n\n// Base Modbus request for Protection Thresholds (0x18 register, length 0x19)\nconst req = Buffer.from([address, 0x78, 0x18, 0x00, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00]);\n\n// Calculate Modbus CRC-16 for the request\nlet crc = 0xFFFF;\nfor (let i = 0; i < 8; i++) {\n    crc ^= req[i];\n    for (let j = 0; j < 8; j++) {\n        if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n        else crc >>= 1;\n    }\n}\n\n// Append the CRC (Little-Endian) to the final 2 bytes\nreq.writeUInt16LE(crc, 8);\n\nmsg.payload = req;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 360,
+        "y": 660,
+        "wires": [
+            [
+                "2e4a61e797e3b02a"
+            ]
+        ]
+    },
+    {
+        "id": "a7b19f57b233b73c",
+        "type": "inject",
+        "z": "656ba0b5eaf2edc4",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "3",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 580,
+        "wires": [
+            [
+                "a926d9de4c7c33c8"
+            ]
+        ]
+    },
+    {
+        "id": "ef8fa4129947f6ad",
+        "type": "inject",
+        "z": "656ba0b5eaf2edc4",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "600",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "4",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 660,
+        "wires": [
+            [
+                "b34e8f2505dcfa08"
+            ]
+        ]
+    },
+    {
+        "id": "ab97384eac0c7ed2",
+        "type": "switch",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Sort by Data Type",
+        "property": "msg.payload[2]",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "16",
+                "vt": "num"
+            },
+            {
+                "t": "eq",
+                "v": "24",
+                "vt": "num"
+            },
+            {
+                "t": "eq",
+                "v": "28",
+                "vt": "num"
+            },
+            {
+                "t": "eq",
+                "v": "32",
+                "vt": "num"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 4,
+        "x": 1130,
+        "y": 720,
+        "wires": [
+            [
+                "dab7398b6a315d23"
+            ],
+            [
+                "da584ac03060f1e7"
+            ],
+            [
+                "7b3187e46c10c732"
+            ],
+            [
+                "1ca1be82cbf421b2"
+            ]
+        ]
+    },
+    {
+        "id": "da584ac03060f1e7",
+        "type": "switch",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Battery ID",
+        "property": "payload[0]",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "1",
+                "vt": "num"
+            },
+            {
+                "t": "eq",
+                "v": "2",
+                "vt": "num"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 2,
+        "x": 1340,
+        "y": 720,
+        "wires": [
+            [
+                "53cfeec4594d6453"
+            ],
+            [
+                "bd91f57f146f5e28"
+            ]
+        ]
+    },
+    {
+        "id": "53cfeec4594d6453",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Parse Protection Stats (Batt 1)",
+        "func": "const buf = msg.payload;\n\n// 1. Modbus CRC-16 Check\nfunction validateCRC(buffer) {\n    if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;\n    let crc = 0xFFFF;\n    const dataLength = buffer.length - 2;\n    for (let i = 0; i < dataLength; i++) {\n        crc ^= buffer[i];\n        for (let j = 0; j < 8; j++) {\n            if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n            else crc >>= 1;\n        }\n    }\n    return crc === buffer.readUInt16LE(dataLength);\n}\n\n// Drop corrupted collisions\nif (!validateCRC(buf)) return null;\n\n// 2. Validate Packet Type\n// Expecting Cmd (0x78), Register (0x18), Data Length (0xD0 / 208 bytes)\nif (buf.length < 216 || buf[1] !== 0x78 || buf[2] !== 0x18) return null;\n\n// Ensure this parser only accepts Battery 1 data\nif (buf[0] !== 0x01) return null;\n\n// The actual parameter data starts at byte 8\nconst offset = 8;\n\n// Helper functions for JBD scaling\nconst readInt = (bytePos) => buf.readUInt16BE(offset + bytePos);\nconst readTemp = (bytePos) => Number(((buf.readUInt16BE(offset + bytePos) - 500) / 10).toFixed(1));\n\n// 3. Map parameters to the Windows UI\nconst data = {\n    // --- Cell Voltages (mV) ---\n    cell_ov_alarm: readInt(0),\n    cell_ov_alarm_recov: readInt(2),\n    cell_ov_alarm_delay: readInt(4),\n    cell_ov_prot: readInt(6),\n    cell_ov_prot_recov: readInt(8),\n    cell_ov_prot_delay: readInt(10),\n\n    cell_uv_alarm: readInt(12),\n    cell_uv_alarm_recov: readInt(14),\n    cell_uv_alarm_delay: readInt(16),\n    cell_uv_prot: readInt(18),\n    cell_uv_prot_recov: readInt(20),\n    cell_uv_prot_delay: readInt(22),\n\n    // --- Pack Voltages (V) -> Stored x100 ---\n    pack_ov_alarm: readInt(24) / 100,\n    pack_ov_alarm_recov: readInt(26) / 100,\n    pack_ov_alarm_delay: readInt(28),\n    pack_ov_prot: readInt(30) / 100,\n    pack_ov_prot_recov: readInt(32) / 100,\n    pack_ov_prot_delay: readInt(34),\n\n    pack_uv_alarm: readInt(36) / 100,\n    pack_uv_alarm_recov: readInt(38) / 100,\n    pack_uv_alarm_delay: readInt(40),\n    pack_uv_prot: readInt(42) / 100,\n    pack_uv_prot_recov: readInt(44) / 100,\n    pack_uv_prot_delay: readInt(46),\n\n    // --- Charge Current (A) -> Stored x10 ---\n    chg_oc_alarm: readInt(48) / 10,\n    chg_oc_alarm_delay: readInt(50),\n    // (Byte 52 is an undocumented delay, skipped)\n    chg_oc_prot: readInt(54) / 10,\n    chg_oc_prot_delay: readInt(56),\n    chg_oc_recov_delay: readInt(58),\n    chg_oc_lock_times: readInt(60),\n\n    chg_oc2_prot: readInt(62) / 10,\n    chg_oc2_prot_delay: readInt(64),\n    chg_oc2_recov_delay: readInt(66),\n\n    // --- Discharge Current (A) -> Stored x10 ---\n    dsg_oc_alarm: readInt(68) / 10,\n    dsg_oc_alarm_delay: readInt(70),\n    // (Byte 72 is an undocumented delay, skipped)\n    dsg_oc_prot: readInt(74) / 10,\n    dsg_oc_prot_delay: readInt(76),\n    dsg_oc_recov_delay: readInt(78),\n    dsg_oc_lock_times: readInt(80),\n\n    dsg_oc2_prot: readInt(82) / 10,\n    dsg_oc2_prot_delay: readInt(84),\n    dsg_oc2_recov_delay: readInt(86),\n\n    // --- Temperatures (\u00b0C) ---\n    chg_ot_alarm: readTemp(88),\n    chg_ot_alarm_recov: readTemp(90),\n    chg_ot_prot: readTemp(94),\n    chg_ot_prot_recov: readTemp(96),\n\n    chg_ut_alarm: readTemp(100),\n    chg_ut_alarm_recov: readTemp(102),\n    chg_ut_prot: readTemp(106),\n    chg_ut_prot_recov: readTemp(108),\n\n    dsg_ot_alarm: readTemp(112),\n    dsg_ot_alarm_recov: readTemp(114),\n    dsg_ot_prot: readTemp(118),\n    dsg_ot_prot_recov: readTemp(120),\n\n    dsg_ut_alarm: readTemp(124),\n    dsg_ut_alarm_recov: readTemp(126),\n    dsg_ut_prot: readTemp(130),\n    dsg_ut_prot_recov: readTemp(132),\n\n    mos_ot_alarm: readTemp(136),\n    mos_ot_alarm_recov: readTemp(138),\n    mos_ot_prot: readTemp(142),\n    mos_ot_prot_recov: readTemp(144),\n\n    ambient_ot_alarm: readTemp(148),\n    ambient_ot_alarm_recov: readTemp(150),\n    ambient_ot_prot: readTemp(154),\n    ambient_ot_prot_recov: readTemp(156),\n\n    // --- Diagnostics ---\n    volt_diff_alarm: readInt(184),\n    volt_diff_alarm_recov: readInt(186),\n    volt_diff_prot: readInt(190),\n    volt_diff_prot_recov: readInt(192),\n\n    soc_low_alarm: readInt(196),\n    soc_low_alarm_recov: readInt(198)\n};\n\n// --- Format and Output ---\nmsg.topic = \"homeassistant/battery_1/protection\";\nmsg.payload = JSON.stringify(data);\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1650,
+        "y": 700,
+        "wires": [
+            [
+                "61722df9b64a777e"
+            ]
+        ]
+    },
+    {
+        "id": "bd91f57f146f5e28",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Parse Protection Stats (Batt 2)",
+        "func": "const buf = msg.payload;\n\n// 1. Modbus CRC-16 Check\nfunction validateCRC(buffer) {\n    if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;\n    let crc = 0xFFFF;\n    const dataLength = buffer.length - 2;\n    for (let i = 0; i < dataLength; i++) {\n        crc ^= buffer[i];\n        for (let j = 0; j < 8; j++) {\n            if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n            else crc >>= 1;\n        }\n    }\n    return crc === buffer.readUInt16LE(dataLength);\n}\n\n// Drop corrupted collisions\nif (!validateCRC(buf)) return null;\n\n// 2. Validate Packet Type\n// Expecting Cmd (0x78), Register (0x18), Data Length (0xD0 / 208 bytes)\nif (buf.length < 216 || buf[1] !== 0x78 || buf[2] !== 0x18) return null;\n\n// Ensure this parser only accepts Battery 2 data\nif (buf[0] !== 0x02) return null;\n\n// The actual parameter data starts at byte 8\nconst offset = 8;\n\n// Helper functions for JBD scaling\nconst readInt = (bytePos) => buf.readUInt16BE(offset + bytePos);\nconst readTemp = (bytePos) => Number(((buf.readUInt16BE(offset + bytePos) - 500) / 10).toFixed(1));\n\n// 3. Map parameters to the Windows UI\nconst data = {\n    // --- Cell Voltages (mV) ---\n    cell_ov_alarm: readInt(0),\n    cell_ov_alarm_recov: readInt(2),\n    cell_ov_alarm_delay: readInt(4),\n    cell_ov_prot: readInt(6),\n    cell_ov_prot_recov: readInt(8),\n    cell_ov_prot_delay: readInt(10),\n\n    cell_uv_alarm: readInt(12),\n    cell_uv_alarm_recov: readInt(14),\n    cell_uv_alarm_delay: readInt(16),\n    cell_uv_prot: readInt(18),\n    cell_uv_prot_recov: readInt(20),\n    cell_uv_prot_delay: readInt(22),\n\n    // --- Pack Voltages (V) -> Stored x100 ---\n    pack_ov_alarm: readInt(24) / 100,\n    pack_ov_alarm_recov: readInt(26) / 100,\n    pack_ov_alarm_delay: readInt(28),\n    pack_ov_prot: readInt(30) / 100,\n    pack_ov_prot_recov: readInt(32) / 100,\n    pack_ov_prot_delay: readInt(34),\n\n    pack_uv_alarm: readInt(36) / 100,\n    pack_uv_alarm_recov: readInt(38) / 100,\n    pack_uv_alarm_delay: readInt(40),\n    pack_uv_prot: readInt(42) / 100,\n    pack_uv_prot_recov: readInt(44) / 100,\n    pack_uv_prot_delay: readInt(46),\n\n    // --- Charge Current (A) -> Stored x10 ---\n    chg_oc_alarm: readInt(48) / 10,\n    chg_oc_alarm_delay: readInt(50),\n    // (Byte 52 is an undocumented delay, skipped)\n    chg_oc_prot: readInt(54) / 10,\n    chg_oc_prot_delay: readInt(56),\n    chg_oc_recov_delay: readInt(58),\n    chg_oc_lock_times: readInt(60),\n\n    chg_oc2_prot: readInt(62) / 10,\n    chg_oc2_prot_delay: readInt(64),\n    chg_oc2_recov_delay: readInt(66),\n\n    // --- Discharge Current (A) -> Stored x10 ---\n    dsg_oc_alarm: readInt(68) / 10,\n    dsg_oc_alarm_delay: readInt(70),\n    // (Byte 72 is an undocumented delay, skipped)\n    dsg_oc_prot: readInt(74) / 10,\n    dsg_oc_prot_delay: readInt(76),\n    dsg_oc_recov_delay: readInt(78),\n    dsg_oc_lock_times: readInt(80),\n\n    dsg_oc2_prot: readInt(82) / 10,\n    dsg_oc2_prot_delay: readInt(84),\n    dsg_oc2_recov_delay: readInt(86),\n\n    // --- Temperatures (\u00b0C) ---\n    chg_ot_alarm: readTemp(88),\n    chg_ot_alarm_recov: readTemp(90),\n    chg_ot_prot: readTemp(94),\n    chg_ot_prot_recov: readTemp(96),\n\n    chg_ut_alarm: readTemp(100),\n    chg_ut_alarm_recov: readTemp(102),\n    chg_ut_prot: readTemp(106),\n    chg_ut_prot_recov: readTemp(108),\n\n    dsg_ot_alarm: readTemp(112),\n    dsg_ot_alarm_recov: readTemp(114),\n    dsg_ot_prot: readTemp(118),\n    dsg_ot_prot_recov: readTemp(120),\n\n    dsg_ut_alarm: readTemp(124),\n    dsg_ut_alarm_recov: readTemp(126),\n    dsg_ut_prot: readTemp(130),\n    dsg_ut_prot_recov: readTemp(132),\n\n    mos_ot_alarm: readTemp(136),\n    mos_ot_alarm_recov: readTemp(138),\n    mos_ot_prot: readTemp(142),\n    mos_ot_prot_recov: readTemp(144),\n\n    ambient_ot_alarm: readTemp(148),\n    ambient_ot_alarm_recov: readTemp(150),\n    ambient_ot_prot: readTemp(154),\n    ambient_ot_prot_recov: readTemp(156),\n\n    // --- Diagnostics ---\n    volt_diff_alarm: readInt(184),\n    volt_diff_alarm_recov: readInt(186),\n    volt_diff_prot: readInt(190),\n    volt_diff_prot_recov: readInt(192),\n\n    soc_low_alarm: readInt(196),\n    soc_low_alarm_recov: readInt(198)\n};\n\n// --- Format and Output ---\nmsg.topic = \"homeassistant/battery_2/protection\";\nmsg.payload = JSON.stringify(data);\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1650,
+        "y": 760,
+        "wires": [
+            [
+                "61722df9b64a777e"
+            ]
+        ]
+    },
+    {
+        "id": "7b3187e46c10c732",
+        "type": "switch",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Battery ID",
+        "property": "payload[0]",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "1",
+                "vt": "num"
+            },
+            {
+                "t": "eq",
+                "v": "2",
+                "vt": "num"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 2,
+        "x": 1360,
+        "y": 820,
+        "wires": [
+            [
+                "01320d1bb148b460"
+            ],
+            [
+                "19ca68bf02721866"
+            ]
+        ]
+    },
+    {
+        "id": "14aef4e6f6da4246",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Balancing and System Request (Batt 1)",
+        "func": "const address = 0x01; \n\n// Request for Balance/Config (0x1C register, length 0x1C)\nconst req = Buffer.from([address, 0x78, 0x1C, 0x00, 0x1C, 0xA0, 0x00, 0x00, 0x00, 0x00]);\n\nlet crc = 0xFFFF;\nfor (let i = 0; i < 8; i++) {\n    crc ^= req[i];\n    for (let j = 0; j < 8; j++) {\n        if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n        else crc >>= 1;\n    }\n}\nreq.writeUInt16LE(crc, 8);\nmsg.payload = req;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 380,
+        "y": 760,
+        "wires": [
+            [
+                "2e4a61e797e3b02a"
+            ]
+        ]
+    },
+    {
+        "id": "8b912adf578d37af",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Balancing and System Request (Batt 2)",
+        "func": "const address = 0x02; \n\n// Request for Balance/Config (0x1C register, length 0x1C)\nconst req = Buffer.from([address, 0x78, 0x1C, 0x00, 0x1C, 0xA0, 0x00, 0x00, 0x00, 0x00]);\n\nlet crc = 0xFFFF;\nfor (let i = 0; i < 8; i++) {\n    crc ^= req[i];\n    for (let j = 0; j < 8; j++) {\n        if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n        else crc >>= 1;\n    }\n}\nreq.writeUInt16LE(crc, 8);\nmsg.payload = req;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 380,
+        "y": 840,
+        "wires": [
+            [
+                "2e4a61e797e3b02a"
+            ]
+        ]
+    },
+    {
+        "id": "01320d1bb148b460",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Parse Balance Data (Batt 1)",
+        "func": "const buf = msg.payload;\n\nfunction validateCRC(buffer) {\n    if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;\n    let crc = 0xFFFF;\n    const dataLength = buffer.length - 2;\n    for (let i = 0; i < dataLength; i++) {\n        crc ^= buffer[i];\n        for (let j = 0; j < 8; j++) {\n            if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n            else crc >>= 1;\n        }\n    }\n    return crc === buffer.readUInt16LE(dataLength);\n}\n\nif (!validateCRC(buf)) return null;\n\n// Validate Packet Type: Cmd (0x78), Register (0x1C)\nif (buf.length < 140 || buf[1] !== 0x78 || buf[2] !== 0x1C) return null;\n\n// Ensure this parser only accepts Battery 1 data\nif (buf[0] !== 0x01) return null;\n\nconst offset = 8;\nconst readInt = (bytePos) => buf.readUInt16BE(offset + bytePos);\n\n// Helper to extract string and strip null padding\nconst readStr = (start, length) => {\n    return buf.toString('ascii', offset + start, offset + start + length).replace(/\\0/g, '').trim();\n};\n\nconst data = {\n    // --- Balance Parameters ---\n    bal_act_volt: readInt(4),\n    bal_act_volt_diff: readInt(6),\n    balance_mode: [\"Static Balance\", \"Charge Balance\", \"Always Balance\"][readInt(0)] || \"Unknown\",\n    \n    // --- Calibration Defaults ---\n    full_chg_cal_volt: readInt(12) / 100, // V\n    full_chg_cal_curr: readInt(14),       // mA\n\n    // --- Serial Numbers & Manufacturing ---\n    bms_sn_code: readStr(16, 26),\n    bms_mfg: `${readInt(46)}-${readInt(48)}-${readInt(50)}`,\n    \n    sn_code: readStr(52, 28),\n    pack_mfg: `${readInt(82)}-${readInt(84)}-${readInt(86)}`,\n    \n    bar_code: readStr(88, 30),\n\n    // --- Standby Sleep Parameters ---\n    stand_sleep_volt: readInt(118),\n    stand_sleep_delay: readInt(120),\n    stand_sleep_curr: readInt(130) / 10,\n    static_sleep_delay: readInt(132)\n};\n\nmsg.topic = \"homeassistant/battery_1/balance\";\nmsg.payload = JSON.stringify(data);\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1640,
+        "y": 840,
+        "wires": [
+            [
+                "61722df9b64a777e"
+            ]
+        ]
+    },
+    {
+        "id": "5fc262554c5f06b5",
+        "type": "inject",
+        "z": "656ba0b5eaf2edc4",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "600",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "4",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 760,
+        "wires": [
+            [
+                "14aef4e6f6da4246"
+            ]
+        ]
+    },
+    {
+        "id": "33b108118f9f9199",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Inverter Paramaters (Batt 1)",
+        "func": "const address = 0x01; // Change to 0x02 for Battery 2\n\n// Request for Capacity/Inverter (0x20 register, length 0x50)\nconst req = Buffer.from([address, 0x78, 0x20, 0x00, 0x20, 0x50, 0x00, 0x00, 0x00, 0x00]);\n\nlet crc = 0xFFFF;\nfor (let i = 0; i < 8; i++) {\n    crc ^= req[i];\n    for (let j = 0; j < 8; j++) {\n        if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n        else crc >>= 1;\n    }\n}\nreq.writeUInt16LE(crc, 8);\nmsg.payload = req;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 920,
+        "wires": [
+            [
+                "2e4a61e797e3b02a"
+            ]
+        ]
+    },
+    {
+        "id": "1ca1be82cbf421b2",
+        "type": "switch",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Battery ID",
+        "property": "payload[0]",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "1",
+                "vt": "num"
+            },
+            {
+                "t": "eq",
+                "v": "2",
+                "vt": "num"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 2,
+        "x": 1340,
+        "y": 1000,
+        "wires": [
+            [
+                "7c36bb8ee9ef34d6"
+            ],
+            [
+                "60a997a4f20a5354"
+            ]
+        ]
+    },
+    {
+        "id": "7c36bb8ee9ef34d6",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Parse Inverter Paramaters (Batt 1)",
+        "func": "const buf = msg.payload;\n\nfunction validateCRC(buffer) {\n    if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;\n    let crc = 0xFFFF;\n    const dataLength = buffer.length - 2;\n    for (let i = 0; i < dataLength; i++) {\n        crc ^= buffer[i];\n        for (let j = 0; j < 8; j++) {\n            if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n            else crc >>= 1;\n        }\n    }\n    return crc === buffer.readUInt16LE(dataLength);\n}\n\nif (!validateCRC(buf)) return null;\n\n// Validate Packet Type: Cmd (0x78), Register (0x20)\nif (buf.length < 60 || buf[1] !== 0x78 || buf[2] !== 0x20) return null;\n\n// Check address\nif (buf[0] !== 0x01) return null; // Change to 0x02 for Battery 2\n\nconst offset = 8;\nconst readInt = (bytePos) => buf.readUInt16BE(offset + bytePos);\n\nconst data = {\n    // --- Capacity Parameters ---\n    nominal_cap: readInt(0) / 100,\n    full_cap: readInt(2) / 100,\n    remain_cap: readInt(4) / 100,\n    soc: readInt(6) / 100,\n    soh: readInt(8),\n    cycle_cnt: readInt(10),\n    \n    // --- Inverter Parameters ---\n    chg_demand_volt: readInt(42) / 10,\n    chg_demand_curr: readInt(44) / 10,\n    dsg_demand_volt: readInt(46) / 10,\n    dsg_demand_curr: readInt(48) / 10\n};\n\nmsg.topic = \"homeassistant/battery_1/inverter\";\nmsg.payload = JSON.stringify(data);\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1660,
+        "y": 1000,
+        "wires": [
+            [
+                "61722df9b64a777e"
+            ]
+        ]
+    },
+    {
+        "id": "c10cdf58b5d24baf",
+        "type": "inject",
+        "z": "656ba0b5eaf2edc4",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "600",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "4",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 920,
+        "wires": [
+            [
+                "33b108118f9f9199"
+            ]
+        ]
+    },
+    {
+        "id": "d4f6f75d5c4723c6",
+        "type": "inject",
+        "z": "656ba0b5eaf2edc4",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "600",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "4",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 840,
+        "wires": [
+            [
+                "8b912adf578d37af"
+            ]
+        ]
+    },
+    {
+        "id": "19ca68bf02721866",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Parse Balance Data (Batt 2)",
+        "func": "const buf = msg.payload;\n\nfunction validateCRC(buffer) {\n    if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;\n    let crc = 0xFFFF;\n    const dataLength = buffer.length - 2;\n    for (let i = 0; i < dataLength; i++) {\n        crc ^= buffer[i];\n        for (let j = 0; j < 8; j++) {\n            if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n            else crc >>= 1;\n        }\n    }\n    return crc === buffer.readUInt16LE(dataLength);\n}\n\nif (!validateCRC(buf)) return null;\n\n// Validate Packet Type: Cmd (0x78), Register (0x1C)\nif (buf.length < 140 || buf[1] !== 0x78 || buf[2] !== 0x1C) return null;\n\n// Ensure this parser only accepts Battery 1 data\nif (buf[0] !== 0x02) return null;\n\nconst offset = 8;\nconst readInt = (bytePos) => buf.readUInt16BE(offset + bytePos);\n\n// Helper to extract string and strip null padding\nconst readStr = (start, length) => {\n    return buf.toString('ascii', offset + start, offset + start + length).replace(/\\0/g, '').trim();\n};\n\nconst data = {\n    // --- Balance Parameters ---\n    bal_act_volt: readInt(4),\n    bal_act_volt_diff: readInt(6),\n    balance_mode: [\"Static Balance\", \"Charge Balance\", \"Always Balance\"][readInt(0)] || \"Unknown\",\n    \n    // --- Calibration Defaults ---\n    full_chg_cal_volt: readInt(12) / 100, // V\n    full_chg_cal_curr: readInt(14),       // mA\n\n    // --- Serial Numbers & Manufacturing ---\n    bms_sn_code: readStr(16, 26),\n    bms_mfg: `${readInt(46)}-${readInt(48)}-${readInt(50)}`,\n    \n    sn_code: readStr(52, 28),\n    pack_mfg: `${readInt(82)}-${readInt(84)}-${readInt(86)}`,\n    \n    bar_code: readStr(88, 30),\n\n    // --- Standby Sleep Parameters ---\n    stand_sleep_volt: readInt(118),\n    stand_sleep_delay: readInt(120),\n    stand_sleep_curr: readInt(130) / 10,\n    static_sleep_delay: readInt(132)\n};\n\nmsg.topic = \"homeassistant/battery_2/balance\";\nmsg.payload = JSON.stringify(data);\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1640,
+        "y": 920,
+        "wires": [
+            [
+                "61722df9b64a777e"
+            ]
+        ]
+    },
+    {
+        "id": "60a997a4f20a5354",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Parse Inverter Paramaters (Batt 2)",
+        "func": "const buf = msg.payload;\n\nfunction validateCRC(buffer) {\n    if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;\n    let crc = 0xFFFF;\n    const dataLength = buffer.length - 2;\n    for (let i = 0; i < dataLength; i++) {\n        crc ^= buffer[i];\n        for (let j = 0; j < 8; j++) {\n            if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n            else crc >>= 1;\n        }\n    }\n    return crc === buffer.readUInt16LE(dataLength);\n}\n\nif (!validateCRC(buf)) return null;\n\n// Validate Packet Type: Cmd (0x78), Register (0x20)\nif (buf.length < 60 || buf[1] !== 0x78 || buf[2] !== 0x20) return null;\n\n// Check address\nif (buf[0] !== 0x02) return null; // Change to 0x02 for Battery 2\n\nconst offset = 8;\nconst readInt = (bytePos) => buf.readUInt16BE(offset + bytePos);\n\nconst data = {\n    // --- Capacity Parameters ---\n    nominal_cap: readInt(0) / 100,\n    full_cap: readInt(2) / 100,\n    remain_cap: readInt(4) / 100,\n    soc: readInt(6) / 100,\n    soh: readInt(8),\n    cycle_cnt: readInt(10),\n    \n    // --- Inverter Parameters ---\n    chg_demand_volt: readInt(42) / 10,\n    chg_demand_curr: readInt(44) / 10,\n    dsg_demand_volt: readInt(46) / 10,\n    dsg_demand_curr: readInt(48) / 10\n};\n\nmsg.topic = \"homeassistant/battery_2/inverter\";\nmsg.payload = JSON.stringify(data);\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1660,
+        "y": 1060,
+        "wires": [
+            [
+                "61722df9b64a777e"
+            ]
+        ]
+    },
+    {
+        "id": "82cba4771bd4e637",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Inverter Paramaters (Batt 2)",
+        "func": "const address = 0x02; // Change to 0x02 for Battery 2\n\n// Request for Capacity/Inverter (0x20 register, length 0x50)\nconst req = Buffer.from([address, 0x78, 0x20, 0x00, 0x20, 0x50, 0x00, 0x00, 0x00, 0x00]);\n\nlet crc = 0xFFFF;\nfor (let i = 0; i < 8; i++) {\n    crc ^= req[i];\n    for (let j = 0; j < 8; j++) {\n        if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n        else crc >>= 1;\n    }\n}\nreq.writeUInt16LE(crc, 8);\nmsg.payload = req;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 1020,
+        "wires": [
+            [
+                "2e4a61e797e3b02a"
+            ]
+        ]
+    },
+    {
+        "id": "3e23e6a0dd34708b",
+        "type": "inject",
+        "z": "656ba0b5eaf2edc4",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "600",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "4",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 1020,
+        "wires": [
+            [
+                "82cba4771bd4e637"
+            ]
+        ]
+    },
+    {
+        "id": "f394e9700bf773cc",
+        "type": "mqtt in",
+        "z": "656ba0b5eaf2edc4",
+        "name": "",
+        "topic": "homeassistant/+/+/set",
+        "qos": "2",
+        "datatype": "json",
+        "broker": "75348da537ca70f5",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 160,
+        "y": 1460,
+        "wires": [
+            [
+                "3b176ab9e580bda8"
+            ]
+        ]
+    },
+    {
+        "id": "3b176ab9e580bda8",
+        "type": "function",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Write Request for BMS",
+        "func": "const topicParts = msg.topic.split('/');\n// Expected format: homeassistant/battery_1/balance_mode/set\nif (topicParts.length !== 4) return null;\n\nconst targetBattery = topicParts[1]; \nconst targetParam = topicParts[2];\nconst inValue = msg.payload;\n\nconst address = (targetBattery === \"battery_1\") ? 0x01 : 0x02;\n\nlet startReg, endReg, dataVal;\n\n// 1. Route the Parameter\nif (targetParam === \"balance_mode\") {\n    startReg = 0x7C;\n    endReg = 0x7E;\n    // HA sends the string, BMS expects 00 00 or 00 01\n    dataVal = (inValue === \"Charge Balance\") ? 0x01 : 0x00;\n} \nelse if (targetParam === \"chg_demand_volt\") {\n    startReg = 0x2A;\n    endReg = 0x2C;\n    // HA sends a float (e.g. 54.1), BMS expects integer x10 (e.g. 541)\n    dataVal = Math.round(Number(inValue) * 10);\n} \nelse {\n    return null; // Unknown command\n}\n\n// 2. Build the Hex Request\n// Base format: Addr | 79 | Block | Start | Block | End | Len | 18 | 4A | 42 | 44 | Data High | Data Low\nconst block = (targetParam === \"chg_demand_volt\") ? 0x20 : 0x1C;\nconst req = Buffer.from([\n    address, 0x79, \n    block, startReg, \n    block, endReg, \n    0x00, 0x06, \n    0x18, 0x4A, 0x42, 0x44, // \"JBD\" Password \n    (dataVal >> 8) & 0xFF,  // Data Byte 1\n    dataVal & 0xFF,         // Data Byte 2\n    0x00, 0x00              // Placeholder for CRC\n]);\n\n// 3. Calculate Modbus CRC-16\nlet crc = 0xFFFF;\nfor (let i = 0; i < 14; i++) {\n    crc ^= req[i];\n    for (let j = 0; j < 8; j++) {\n        if (crc & 1) crc = (crc >> 1) ^ 0xA001;\n        else crc >>= 1;\n    }\n}\nreq.writeUInt16LE(crc, 14);\n\nmsg.payload = req;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 280,
+        "y": 1320,
+        "wires": [
+            [
+                "2e4a61e797e3b02a",
+                "975fe01505772213"
+            ]
+        ]
+    },
+    {
+        "id": "975fe01505772213",
+        "type": "switch",
+        "z": "656ba0b5eaf2edc4",
+        "name": "Battery ID",
+        "property": "payload[0]",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "1",
+                "vt": "num"
+            },
+            {
+                "t": "eq",
+                "v": "2",
+                "vt": "num"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 2,
+        "x": 260,
+        "y": 1160,
+        "wires": [
+            [
+                "33b108118f9f9199"
+            ],
+            [
+                "82cba4771bd4e637"
+            ]
+        ]
+    },
+    {
+        "id": "01a3e3a6cf501ff6",
+        "type": "inject",
+        "z": "d222e1db84f22e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 170,
+        "y": 720,
+        "wires": [
+            [
+                "82d4dd523a68e9d0",
+                "dfe96c0243057827",
+                "ee3b8eb02ca71ec5",
+                "6bfade2d78e87643"
+            ]
+        ]
+    },
+    {
+        "id": "82d4dd523a68e9d0",
+        "type": "function",
+        "z": "d222e1db84f22e70",
+        "name": "function 1",
+        "func": "// CHANGE THIS NAME ONLY (e.g., \"battery_1\" or \"battery_2\")\nconst bmsName = \"battery_1\"; \n\nconst device = {\n    identifiers: [bmsName],\n    name: bmsName, \n    model: \"JBD UP16S 48V\",\n    manufacturer: \"JBD\"\n};\n\nconst stateTopic = `homeassistant/${bmsName}/state`;\nconst configs = [];\n\nfunction addSensor(id, name, unit, devClass, stateClass, valTemplate, precision) {\n    const payload = {\n        name: name, \n        has_entity_name: true,\n        unique_id: `${bmsName}_${id}`,\n        state_topic: stateTopic,\n        value_template: valTemplate || `{{ value_json.${id} }}`,\n        unit_of_measurement: unit,\n        device_class: devClass,\n        state_class: stateClass,\n        device: device\n    };\n\n    if (precision !== undefined) payload.suggested_display_precision = precision;\n\n    configs.push({\n        topic: `homeassistant/sensor/${bmsName}/${id}/config`,\n        payload: payload\n    });\n}\n\nfunction addBinary(id, name, devClass, valTemplate) {\n    configs.push({\n        topic: `homeassistant/binary_sensor/${bmsName}/${id}/config`,\n        payload: {\n            name: name,\n            has_entity_name: true,\n            unique_id: `${bmsName}_${id}`,\n            state_topic: stateTopic,\n            value_template: valTemplate || `{{ value_json.${id} }}`,\n            payload_on: \"ON\",\n            payload_off: \"OFF\",\n            device_class: devClass,\n            device: device\n        }\n    });\n}\n\n// 1. Pack-Level Metrics\naddSensor(\"voltage\", \"Voltage\", \"V\", \"voltage\", \"measurement\", null, 2);\naddSensor(\"current\", \"Current\", \"A\", \"current\", \"measurement\", null, 2);\naddSensor(\"power\", \"Power\", \"W\", \"power\", \"measurement\", null, 1);\naddSensor(\"soc\", \"Soc\", \"%\", \"battery\", \"measurement\");\naddSensor(\"capacity\", \"Capacity\", \"Ah\", null, \"measurement\");\naddSensor(\"charge\", \"Charge\", \"Ah\", null, \"measurement\");\naddSensor(\"num_cycles\", \"Num_cycles\", null, null, \"total_increasing\");\naddSensor(\"total_cycle_count\", \"total cycle count\", null, null, \"total_increasing\");\naddSensor(\"runtime\", \"Runtime\", \"h\", \"duration\", \"measurement\", null, 1);\naddSensor(\"num_samples\", \"Num_samples\", null, null, \"total_increasing\");\n\n// 2. Cell Metrics & Stats\nfor (let i = 1; i <= 16; i++) {\n    const pad = i < 10 ? '0' + i : i;\n    addSensor(`cell_volt_${pad}`, `Cell Volt ${pad}`, \"V\", \"voltage\", \"measurement\", null, 3);\n}\naddSensor(\"cell_volt_min\", \"Cell Volt min\", \"V\", \"voltage\", \"measurement\", null, 3);\naddSensor(\"cell_volt_max\", \"Cell Volt max\", \"V\", \"voltage\", \"measurement\", null, 3);\naddSensor(\"cell_volt_average\", \"Cell Volt average\", \"V\", \"voltage\", \"measurement\", null, 3);\naddSensor(\"cell_volt_median\", \"Cell Volt median\", \"V\", \"voltage\", \"measurement\", null, 3);\naddSensor(\"cell_volt_delta\", \"Cell Volt delta\", \"V\", \"voltage\", \"measurement\", null, 3);\naddSensor(\"cell_index_min\", \"Cell Index min\", null, null, null);\naddSensor(\"cell_index_max\", \"Cell Index max\", null, null, null);\n\n// 3. Temperatures \naddSensor(\"temp_cell_1\", \"Cell Temp 1\", \"\u00b0C\", \"temperature\", \"measurement\", null, 1);\naddSensor(\"temp_cell_2\", \"Cell Temp 2\", \"\u00b0C\", \"temperature\", \"measurement\", null, 1);\naddSensor(\"temp_cell_3\", \"Cell Temp 3\", \"\u00b0C\", \"temperature\", \"measurement\", null, 1);\naddSensor(\"temp_cell_4\", \"Cell Temp 4\", \"\u00b0C\", \"temperature\", \"measurement\", null, 1);\naddSensor(\"temp_ambient\", \"Ambient Temp\", \"\u00b0C\", \"temperature\", \"measurement\", null, 1);\naddSensor(\"temp_mos\", \"MOS Temp\", \"\u00b0C\", \"temperature\", \"measurement\", null, 1);\n\n// 4. Cumulative Energy Metrics\naddSensor(\"total_energy_netted\", \"total energy netted\", \"kWh\", \"energy\", \"total\");\naddSensor(\"total_energy_input\", \"total energy input\", \"kWh\", \"energy\", \"total_increasing\");\naddSensor(\"total_energy_output\", \"total energy output\", \"kWh\", \"energy\", \"total_increasing\");\naddSensor(\"total_charge_netted\", \"total charge netted\", \"Ah\", null, \"total\");\n\n// 5. Status, Health & Balancing\naddBinary(\"balancing\", \"Balancing\", null);\naddSensor(\"balancing_cells\", \"Balancing Cells\", null, null, null);\naddBinary(\"problem\", \"Problem\", \"problem\");\naddSensor(\"problem_code\", \"Problem Code\", null, null, null);\naddSensor(\"soh\", \"State of Health\", \"%\", null, \"measurement\");\naddBinary(\"charge_switch\", \"Charge Switch\", null);\naddBinary(\"discharge_switch\", \"Discharge Switch\", null);\n\nreturn [configs.map(c => ({ topic: c.topic, payload: JSON.stringify(c.payload), retain: true }))];",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 520,
+        "y": 640,
+        "wires": [
+            [
+                "61e8588db7092af4"
+            ]
+        ]
+    },
+    {
+        "id": "61e8588db7092af4",
+        "type": "mqtt out",
+        "z": "d222e1db84f22e70",
+        "name": "",
+        "topic": "",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "75348da537ca70f5",
+        "x": 930,
+        "y": 720,
+        "wires": []
+    },
+    {
+        "id": "dfe96c0243057827",
+        "type": "function",
+        "z": "d222e1db84f22e70",
+        "name": "Parse Protection Stats (Batt 1)",
+        "func": "const bmsName = \"battery_1\"; // Change to battery_2 for the second flow\nconst stateTopic = `homeassistant/${bmsName}/protection`;\n\n// We inject the parsed data object directly into the script to read the keys\nconst keys = [\n    \"cell_ov_alarm\", \"cell_ov_alarm_recov\", \"cell_ov_alarm_delay\", \"cell_ov_prot\", \"cell_ov_prot_recov\", \"cell_ov_prot_delay\",\n    \"cell_uv_alarm\", \"cell_uv_alarm_recov\", \"cell_uv_alarm_delay\", \"cell_uv_prot\", \"cell_uv_prot_recov\", \"cell_uv_prot_delay\",\n    \"pack_ov_alarm\", \"pack_ov_alarm_recov\", \"pack_ov_alarm_delay\", \"pack_ov_prot\", \"pack_ov_prot_recov\", \"pack_ov_prot_delay\",\n    \"pack_uv_alarm\", \"pack_uv_alarm_recov\", \"pack_uv_alarm_delay\", \"pack_uv_prot\", \"pack_uv_prot_recov\", \"pack_uv_prot_delay\",\n    \"chg_oc_alarm\", \"chg_oc_alarm_delay\", \"chg_oc_prot\", \"chg_oc_prot_delay\", \"chg_oc_recov_delay\", \"chg_oc_lock_times\",\n    \"chg_oc2_prot\", \"chg_oc2_prot_delay\", \"chg_oc2_recov_delay\",\n    \"dsg_oc_alarm\", \"dsg_oc_alarm_delay\", \"dsg_oc_prot\", \"dsg_oc_prot_delay\", \"dsg_oc_recov_delay\", \"dsg_oc_lock_times\",\n    \"dsg_oc2_prot\", \"dsg_oc2_prot_delay\", \"dsg_oc2_recov_delay\",\n    \"chg_ot_alarm\", \"chg_ot_alarm_recov\", \"chg_ot_prot\", \"chg_ot_prot_recov\",\n    \"chg_ut_alarm\", \"chg_ut_alarm_recov\", \"chg_ut_prot\", \"chg_ut_prot_recov\",\n    \"dsg_ot_alarm\", \"dsg_ot_alarm_recov\", \"dsg_ot_prot\", \"dsg_ot_prot_recov\",\n    \"dsg_ut_alarm\", \"dsg_ut_alarm_recov\", \"dsg_ut_prot\", \"dsg_ut_prot_recov\",\n    \"mos_ot_alarm\", \"mos_ot_alarm_recov\", \"mos_ot_prot\", \"mos_ot_prot_recov\",\n    \"ambient_ot_alarm\", \"ambient_ot_alarm_recov\", \"ambient_ot_prot\", \"ambient_ot_prot_recov\",\n    \"volt_diff_alarm\", \"volt_diff_alarm_recov\", \"volt_diff_prot\", \"volt_diff_prot_recov\",\n    \"soc_low_alarm\", \"soc_low_alarm_recov\"\n];\n\nconst msgs = [];\n\nkeys.forEach(key => {\n    let unit = \"\";\n    if (key.includes(\"cell_\") || key.includes(\"volt_diff\")) unit = \"mV\";\n    if (key.includes(\"pack_\")) unit = \"V\";\n    if (key.includes(\"_oc\")) unit = \"A\";\n    if (key.includes(\"_ot\") || key.includes(\"_ut\")) unit = \"\u00b0C\";\n    if (key.includes(\"delay\") || key.includes(\"lock\") || key.includes(\"recov_delay\")) unit = \"ms\";\n    if (key === \"soc_low_alarm\" || key === \"soc_low_alarm_recov\") unit = \"%\";\n\n    // Clean up the name for the UI (e.g. \"cell_ov_alarm\" -> \"Cell Ov Alarm\")\n    const friendlyName = key.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');\n\n    const payload = {\n        name: `${friendlyName}`,\n        state_topic: stateTopic,\n        value_template: `{{ value_json.${key} }}`,\n        unique_id: `${bmsName}_${key}`,\n        device: {\n            identifiers: [bmsName],\n            name: bmsName,\n            manufacturer: \"JBD\"\n        },\n        entity_category: \"diagnostic\" // Maps to the Diagnostic block in HA\n    };\n    \n    if (unit) payload.unit_of_measurement = unit;\n\n    msgs.push({\n        topic: `homeassistant/sensor/${bmsName}/${key}/config`,\n        payload: payload,\n        retain: true\n    });\n});\n\nreturn [msgs];",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 550,
+        "y": 720,
+        "wires": [
+            [
+                "61e8588db7092af4"
+            ]
+        ]
+    },
+    {
+        "id": "ee3b8eb02ca71ec5",
+        "type": "function",
+        "z": "d222e1db84f22e70",
+        "name": "function 4",
+        "func": "const bmsName = \"battery_1\"; \nconst stateTopic = `homeassistant/${bmsName}/balance`;\n\nconst entities = {\n    bal_act_volt: { name: \"Balance Act Volt\", unit: \"mV\" },\n    bal_act_volt_diff: { name: \"Balance Act Volt Diff\", unit: \"mV\" },\n    balance_mode: { name: \"Balance Mode\", unit: null },\n    full_chg_cal_volt: { name: \"Full Chg Cal Volt\", unit: \"V\" },\n    full_chg_cal_curr: { name: \"Full Chg Cal Curr\", unit: \"mA\" },\n    bms_sn_code: { name: \"BMS SN Code\", unit: null },\n    bms_mfg: { name: \"BMS MFG\", unit: null },\n    sn_code: { name: \"SN Code\", unit: null },\n    pack_mfg: { name: \"Pack MFG\", unit: null },\n    bar_code: { name: \"Bar Code\", unit: null },\n    stand_sleep_volt: { name: \"Stand Sleep Volt\", unit: \"mV\" },\n    stand_sleep_delay: { name: \"Stand Sleep Delay\", unit: \"min\" },\n    stand_sleep_curr: { name: \"Stand Sleep Curr\", unit: \"A\" },\n    static_sleep_delay: { name: \"Static Sleep Delay\", unit: \"min\" }\n};\n\nconst msgs = [];\n\nfor (const [key, config] of Object.entries(entities)) {\n    const payload = {\n        name: config.name,\n        state_topic: stateTopic,\n        value_template: `{{ value_json.${key} }}`,\n        unique_id: `${bmsName}_${key}`,\n        device: {\n            identifiers: [bmsName],\n            name: bmsName,\n            manufacturer: \"JBD\"\n        },\n        entity_category: \"diagnostic\" \n    };\n    \n    if (config.unit) payload.unit_of_measurement = config.unit;\n\n    msgs.push({\n        topic: `homeassistant/sensor/${bmsName}/${key}/config`,\n        payload: payload,\n        retain: true\n    });\n}\n\nreturn [msgs];",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 520,
+        "y": 820,
+        "wires": [
+            [
+                "61e8588db7092af4"
+            ]
+        ]
+    },
+    {
+        "id": "6bfade2d78e87643",
+        "type": "function",
+        "z": "d222e1db84f22e70",
+        "name": "function 5",
+        "func": "const bmsName = \"battery_1\"; // Run again for battery_2\nconst stateTopic = `homeassistant/${bmsName}/inverter`;\n\nconst entities = {\n    nominal_cap: { name: \"Nominal Cap\", unit: \"Ah\" },\n    soh: { name: \"State of Health\", unit: \"%\" },\n    chg_demand_volt: { name: \"Chg Demand Volt\", unit: \"V\" },\n    chg_demand_curr: { name: \"Chg Demand Curr\", unit: \"A\" },\n    dsg_demand_volt: { name: \"Dsg Demand Volt\", unit: \"V\" },\n    dsg_demand_curr: { name: \"Dsg Demand Curr\", unit: \"A\" }\n};\n\nconst msgs = [];\n\nfor (const [key, config] of Object.entries(entities)) {\n    const payload = {\n        name: config.name,\n        state_topic: stateTopic,\n        value_template: `{{ value_json.${key} }}`,\n        unique_id: `${bmsName}_${key}`,\n        device: { identifiers: [bmsName], name: bmsName, manufacturer: \"JBD\" },\n        entity_category: \"diagnostic\" \n    };\n    if (config.unit) payload.unit_of_measurement = config.unit;\n    msgs.push({ topic: `homeassistant/sensor/${bmsName}/${key}/config`, payload: payload, retain: true });\n}\n\nreturn [msgs];",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 540,
+        "y": 960,
+        "wires": [
+            [
+                "61e8588db7092af4"
+            ]
+        ]
+    },
+    {
+        "id": "4123f6cf8c700fb1",
+        "type": "inject",
+        "z": "ca3062c10fd3e312",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 210,
+        "y": 540,
+        "wires": [
+            [
+                "b2349f85d50c3c2e",
+                "519e0c708f3f22c6",
+                "c5c2bee862efb59d",
+                "1c8fe97c1cf5a045"
+            ]
+        ]
+    },
+    {
+        "id": "b2349f85d50c3c2e",
+        "type": "function",
+        "z": "ca3062c10fd3e312",
+        "name": "function 2",
+        "func": "// CHANGE THIS NAME ONLY (e.g., \"battery_1\" or \"battery_2\")\nconst bmsName = \"battery_2\"; \n\nconst device = {\n    identifiers: [bmsName],\n    name: bmsName, \n    model: \"JBD UP16S 48V\",\n    manufacturer: \"JBD\"\n};\n\nconst stateTopic = `homeassistant/${bmsName}/state`;\nconst configs = [];\n\nfunction addSensor(id, name, unit, devClass, stateClass, valTemplate, precision) {\n    const payload = {\n        name: name, \n        has_entity_name: true,\n        unique_id: `${bmsName}_${id}`,\n        state_topic: stateTopic,\n        value_template: valTemplate || `{{ value_json.${id} }}`,\n        unit_of_measurement: unit,\n        device_class: devClass,\n        state_class: stateClass,\n        device: device\n    };\n\n    if (precision !== undefined) payload.suggested_display_precision = precision;\n\n    configs.push({\n        topic: `homeassistant/sensor/${bmsName}/${id}/config`,\n        payload: payload\n    });\n}\n\nfunction addBinary(id, name, devClass, valTemplate) {\n    configs.push({\n        topic: `homeassistant/binary_sensor/${bmsName}/${id}/config`,\n        payload: {\n            name: name,\n            has_entity_name: true,\n            unique_id: `${bmsName}_${id}`,\n            state_topic: stateTopic,\n            value_template: valTemplate || `{{ value_json.${id} }}`,\n            payload_on: \"ON\",\n            payload_off: \"OFF\",\n            device_class: devClass,\n            device: device\n        }\n    });\n}\n\n// 1. Pack-Level Metrics\naddSensor(\"voltage\", \"Voltage\", \"V\", \"voltage\", \"measurement\", null, 2);\naddSensor(\"current\", \"Current\", \"A\", \"current\", \"measurement\", null, 2);\naddSensor(\"power\", \"Power\", \"W\", \"power\", \"measurement\", null, 1);\naddSensor(\"soc\", \"Soc\", \"%\", \"battery\", \"measurement\");\naddSensor(\"capacity\", \"Capacity\", \"Ah\", null, \"measurement\");\naddSensor(\"charge\", \"Charge\", \"Ah\", null, \"measurement\");\naddSensor(\"num_cycles\", \"Num_cycles\", null, null, \"total_increasing\");\naddSensor(\"total_cycle_count\", \"total cycle count\", null, null, \"total_increasing\");\naddSensor(\"runtime\", \"Runtime\", \"h\", \"duration\", \"measurement\", null, 1);\naddSensor(\"num_samples\", \"Num_samples\", null, null, \"total_increasing\");\n\n// 2. Cell Metrics & Stats\nfor (let i = 1; i <= 16; i++) {\n    const pad = i < 10 ? '0' + i : i;\n    addSensor(`cell_volt_${pad}`, `Cell Volt ${pad}`, \"V\", \"voltage\", \"measurement\", null, 3);\n}\naddSensor(\"cell_volt_min\", \"Cell Volt min\", \"V\", \"voltage\", \"measurement\", null, 3);\naddSensor(\"cell_volt_max\", \"Cell Volt max\", \"V\", \"voltage\", \"measurement\", null, 3);\naddSensor(\"cell_volt_average\", \"Cell Volt average\", \"V\", \"voltage\", \"measurement\", null, 3);\naddSensor(\"cell_volt_median\", \"Cell Volt median\", \"V\", \"voltage\", \"measurement\", null, 3);\naddSensor(\"cell_volt_delta\", \"Cell Volt delta\", \"V\", \"voltage\", \"measurement\", null, 3);\naddSensor(\"cell_index_min\", \"Cell Index min\", null, null, null);\naddSensor(\"cell_index_max\", \"Cell Index max\", null, null, null);\n\n// 3. Temperatures \naddSensor(\"temp_cell_1\", \"Cell Temp 1\", \"\u00b0C\", \"temperature\", \"measurement\", null, 1);\naddSensor(\"temp_cell_2\", \"Cell Temp 2\", \"\u00b0C\", \"temperature\", \"measurement\", null, 1);\naddSensor(\"temp_cell_3\", \"Cell Temp 3\", \"\u00b0C\", \"temperature\", \"measurement\", null, 1);\naddSensor(\"temp_cell_4\", \"Cell Temp 4\", \"\u00b0C\", \"temperature\", \"measurement\", null, 1);\naddSensor(\"temp_ambient\", \"Ambient Temp\", \"\u00b0C\", \"temperature\", \"measurement\", null, 1);\naddSensor(\"temp_mos\", \"MOS Temp\", \"\u00b0C\", \"temperature\", \"measurement\", null, 1);\n\n// 4. Cumulative Energy Metrics\naddSensor(\"total_energy_netted\", \"total energy netted\", \"kWh\", \"energy\", \"total\");\naddSensor(\"total_energy_input\", \"total energy input\", \"kWh\", \"energy\", \"total_increasing\");\naddSensor(\"total_energy_output\", \"total energy output\", \"kWh\", \"energy\", \"total_increasing\");\naddSensor(\"total_charge_netted\", \"total charge netted\", \"Ah\", null, \"total\");\n\n// 5. Status, Health & Balancing\naddBinary(\"balancing\", \"Balancing\", null);\naddSensor(\"balancing_cells\", \"Balancing Cells\", null, null, null);\naddBinary(\"problem\", \"Problem\", \"problem\");\naddSensor(\"problem_code\", \"Problem Code\", null, null, null);\naddSensor(\"soh\", \"State of Health\", \"%\", null, \"measurement\");\naddBinary(\"charge_switch\", \"Charge Switch\", null);\naddBinary(\"discharge_switch\", \"Discharge Switch\", null);\n\nreturn [configs.map(c => ({ topic: c.topic, payload: JSON.stringify(c.payload), retain: true }))];",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 560,
+        "y": 380,
+        "wires": [
+            [
+                "fe466b105524b0f3"
+            ]
+        ]
+    },
+    {
+        "id": "fe466b105524b0f3",
+        "type": "mqtt out",
+        "z": "ca3062c10fd3e312",
+        "name": "",
+        "topic": "",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "75348da537ca70f5",
+        "x": 890,
+        "y": 540,
+        "wires": []
+    },
+    {
+        "id": "519e0c708f3f22c6",
+        "type": "function",
+        "z": "ca3062c10fd3e312",
+        "name": "function 3",
+        "func": "const bmsName = \"battery_2\"; // Change to battery_2 for the second flow\nconst stateTopic = `homeassistant/${bmsName}/protection`;\n\n// We inject the parsed data object directly into the script to read the keys\nconst keys = [\n    \"cell_ov_alarm\", \"cell_ov_alarm_recov\", \"cell_ov_alarm_delay\", \"cell_ov_prot\", \"cell_ov_prot_recov\", \"cell_ov_prot_delay\",\n    \"cell_uv_alarm\", \"cell_uv_alarm_recov\", \"cell_uv_alarm_delay\", \"cell_uv_prot\", \"cell_uv_prot_recov\", \"cell_uv_prot_delay\",\n    \"pack_ov_alarm\", \"pack_ov_alarm_recov\", \"pack_ov_alarm_delay\", \"pack_ov_prot\", \"pack_ov_prot_recov\", \"pack_ov_prot_delay\",\n    \"pack_uv_alarm\", \"pack_uv_alarm_recov\", \"pack_uv_alarm_delay\", \"pack_uv_prot\", \"pack_uv_prot_recov\", \"pack_uv_prot_delay\",\n    \"chg_oc_alarm\", \"chg_oc_alarm_delay\", \"chg_oc_prot\", \"chg_oc_prot_delay\", \"chg_oc_recov_delay\", \"chg_oc_lock_times\",\n    \"chg_oc2_prot\", \"chg_oc2_prot_delay\", \"chg_oc2_recov_delay\",\n    \"dsg_oc_alarm\", \"dsg_oc_alarm_delay\", \"dsg_oc_prot\", \"dsg_oc_prot_delay\", \"dsg_oc_recov_delay\", \"dsg_oc_lock_times\",\n    \"dsg_oc2_prot\", \"dsg_oc2_prot_delay\", \"dsg_oc2_recov_delay\",\n    \"chg_ot_alarm\", \"chg_ot_alarm_recov\", \"chg_ot_prot\", \"chg_ot_prot_recov\",\n    \"chg_ut_alarm\", \"chg_ut_alarm_recov\", \"chg_ut_prot\", \"chg_ut_prot_recov\",\n    \"dsg_ot_alarm\", \"dsg_ot_alarm_recov\", \"dsg_ot_prot\", \"dsg_ot_prot_recov\",\n    \"dsg_ut_alarm\", \"dsg_ut_alarm_recov\", \"dsg_ut_prot\", \"dsg_ut_prot_recov\",\n    \"mos_ot_alarm\", \"mos_ot_alarm_recov\", \"mos_ot_prot\", \"mos_ot_prot_recov\",\n    \"ambient_ot_alarm\", \"ambient_ot_alarm_recov\", \"ambient_ot_prot\", \"ambient_ot_prot_recov\",\n    \"volt_diff_alarm\", \"volt_diff_alarm_recov\", \"volt_diff_prot\", \"volt_diff_prot_recov\",\n    \"soc_low_alarm\", \"soc_low_alarm_recov\"\n];\n\nconst msgs = [];\n\nkeys.forEach(key => {\n    let unit = \"\";\n    if (key.includes(\"cell_\") || key.includes(\"volt_diff\")) unit = \"mV\";\n    if (key.includes(\"pack_\")) unit = \"V\";\n    if (key.includes(\"_oc\")) unit = \"A\";\n    if (key.includes(\"_ot\") || key.includes(\"_ut\")) unit = \"\u00b0C\";\n    if (key.includes(\"delay\") || key.includes(\"lock\") || key.includes(\"recov_delay\")) unit = \"ms\";\n    if (key === \"soc_low_alarm\" || key === \"soc_low_alarm_recov\") unit = \"%\";\n\n    // Clean up the name for the UI (e.g. \"cell_ov_alarm\" -> \"Cell Ov Alarm\")\n    const friendlyName = key.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');\n\n    const payload = {\n        name: `${friendlyName}`,\n        state_topic: stateTopic,\n        value_template: `{{ value_json.${key} }}`,\n        unique_id: `${bmsName}_${key}`,\n        device: {\n            identifiers: [bmsName],\n            name: bmsName,\n            manufacturer: \"JBD\"\n        },\n        entity_category: \"diagnostic\" // Maps to the Diagnostic block in HA\n    };\n    \n    if (unit) payload.unit_of_measurement = unit;\n\n    msgs.push({\n        topic: `homeassistant/sensor/${bmsName}/${key}/config`,\n        payload: payload,\n        retain: true\n    });\n});\n\nreturn [msgs];",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 560,
+        "y": 540,
+        "wires": [
+            [
+                "fe466b105524b0f3"
+            ]
+        ]
+    },
+    {
+        "id": "c5c2bee862efb59d",
+        "type": "function",
+        "z": "ca3062c10fd3e312",
+        "name": "function 6",
+        "func": "const bmsName = \"battery_2\"; \nconst stateTopic = `homeassistant/${bmsName}/balance`;\n\nconst entities = {\n    bal_act_volt: { name: \"Balance Act Volt\", unit: \"mV\" },\n    bal_act_volt_diff: { name: \"Balance Act Volt Diff\", unit: \"mV\" },\n    balance_mode: { name: \"Balance Mode\", unit: null },\n    full_chg_cal_volt: { name: \"Full Chg Cal Volt\", unit: \"V\" },\n    full_chg_cal_curr: { name: \"Full Chg Cal Curr\", unit: \"mA\" },\n    bms_sn_code: { name: \"BMS SN Code\", unit: null },\n    bms_mfg: { name: \"BMS MFG\", unit: null },\n    sn_code: { name: \"SN Code\", unit: null },\n    pack_mfg: { name: \"Pack MFG\", unit: null },\n    bar_code: { name: \"Bar Code\", unit: null },\n    stand_sleep_volt: { name: \"Stand Sleep Volt\", unit: \"mV\" },\n    stand_sleep_delay: { name: \"Stand Sleep Delay\", unit: \"min\" },\n    stand_sleep_curr: { name: \"Stand Sleep Curr\", unit: \"A\" },\n    static_sleep_delay: { name: \"Static Sleep Delay\", unit: \"min\" }\n};\n\nconst msgs = [];\n\nfor (const [key, config] of Object.entries(entities)) {\n    const payload = {\n        name: config.name,\n        state_topic: stateTopic,\n        value_template: `{{ value_json.${key} }}`,\n        unique_id: `${bmsName}_${key}`,\n        device: {\n            identifiers: [bmsName],\n            name: bmsName,\n            manufacturer: \"JBD\"\n        },\n        entity_category: \"diagnostic\" \n    };\n    \n    if (config.unit) payload.unit_of_measurement = config.unit;\n\n    msgs.push({\n        topic: `homeassistant/sensor/${bmsName}/${key}/config`,\n        payload: payload,\n        retain: true\n    });\n}\n\nreturn [msgs];",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 560,
+        "y": 640,
+        "wires": [
+            [
+                "fe466b105524b0f3"
+            ]
+        ]
+    },
+    {
+        "id": "1c8fe97c1cf5a045",
+        "type": "function",
+        "z": "ca3062c10fd3e312",
+        "name": "function 7",
+        "func": "const bmsName = \"battery_2\";\nconst stateTopic = `homeassistant/${bmsName}/inverter`;\n\nconst entities = {\n    nominal_cap: { name: \"Nominal Cap\", unit: \"Ah\" },\n    soh: { name: \"State of Health\", unit: \"%\" },\n    chg_demand_volt: { name: \"Chg Demand Volt\", unit: \"V\" },\n    chg_demand_curr: { name: \"Chg Demand Curr\", unit: \"A\" },\n    dsg_demand_volt: { name: \"Dsg Demand Volt\", unit: \"V\" },\n    dsg_demand_curr: { name: \"Dsg Demand Curr\", unit: \"A\" }\n};\n\nconst msgs = [];\n\nfor (const [key, config] of Object.entries(entities)) {\n    const payload = {\n        name: config.name,\n        state_topic: stateTopic,\n        value_template: `{{ value_json.${key} }}`,\n        unique_id: `${bmsName}_${key}`,\n        device: { identifiers: [bmsName], name: bmsName, manufacturer: \"JBD\" },\n        entity_category: \"diagnostic\" \n    };\n    if (config.unit) payload.unit_of_measurement = config.unit;\n    msgs.push({ topic: `homeassistant/sensor/${bmsName}/${key}/config`, payload: payload, retain: true });\n}\n\nreturn [msgs];",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 560,
+        "y": 760,
+        "wires": [
+            [
+                "fe466b105524b0f3"
+            ]
+        ]
+    },
+    {
+        "id": "e4d7df30537b8af1",
+        "type": "global-config",
+        "env": [],
+        "modules": {}
+    }
+]
