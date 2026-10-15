@@ -87,7 +87,7 @@ flowchart LR
 
 ### 2. RS485-to-Ethernet / WiFi Adapter
 Connect an industrial serial gateway to the battery's RS485 port. Popular options include:
-* **Waveshare RS485 to RJ45 Ethernet Converter** (e.g. RS485 TO ETH (B))
+* **Waveshare RS485 to RJ45 Ethernet Converter** (e.g. RS485 TO ETH (B)) (tested and working)
 * **Elfin-EW11** (WiFi) or **Elfin-EE11** (Ethernet)
 * **USR-TCP232-304 / 410s**
 
